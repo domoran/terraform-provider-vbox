@@ -24,6 +24,8 @@ func netTfToVbox(ctx context.Context, d *schema.ResourceData) ([]NIC, error) {
 			return NICNetInternal, nil
 		case "generic":
 			return NICNetGeneric, nil
+		case "natnetwork":
+			return NICNetNatnetwork, nil
 		default:
 			return "", fmt.Errorf("invalid virtual network adapter type: %s", attr)
 		}
@@ -69,6 +71,15 @@ func netTfToVbox(ctx context.Context, d *schema.ResourceData) ([]NIC, error) {
 			adapter.HostInterface, ok = d.Get(prefix + "host_interface").(string)
 			if !ok || adapter.HostInterface == "" {
 				err = fmt.Errorf("'host_interface' property not set for '#%d' network adapter", i)
+			}
+		}
+
+		/* 'natnetwork' type needs property 'nat_network' to be set */
+		if adapter.Network == NICNetNatnetwork {
+			if attr, ok := d.Get(prefix + "nat_network").(string); ok && attr != "" {
+				adapter.NatNetwork = attr
+			} else {
+				err = fmt.Errorf("'nat_network' property not set for '#%d' network adapter", i)
 			}
 		}
 
@@ -188,6 +199,42 @@ func applyNICSettings(ctx context.Context, vmUUID string, d *schema.ResourceData
 				}
 			}
 		}
+
+		// NAT Network settings
+		if nicType == "natnetwork" {
+			// Set the NAT network name
+			if natNetName, ok := d.GetOk(prefix + "nat_network"); ok && natNetName.(string) != "" {
+				if _, _, err := vboxRun(ctx, "modifyvm", vmUUID,
+					fmt.Sprintf("--nat-network%d", nicIdx), natNetName.(string)); err != nil {
+					return fmt.Errorf("failed to set NAT network on NIC %d: %w", i, err)
+				}
+			}
+
+			// Port forwarding rules for NAT networks use --nat-pf<N> (not --natpf<N>)
+			pfCount := d.Get(fmt.Sprintf("network_adapter.%d.port_forwarding.#", i)).(int)
+			if pfCount > 0 {
+				// Delete existing rules first (ignore errors as there may be none)
+				vboxRun(ctx, "modifyvm", vmUUID, fmt.Sprintf("--nat-pf%d", nicIdx), "delete", "all") //nolint:errcheck
+
+				for j := 0; j < pfCount; j++ {
+					pfPrefix := fmt.Sprintf("network_adapter.%d.port_forwarding.%d.", i, j)
+					ruleName := d.Get(pfPrefix + "name").(string)
+					protocol := d.Get(pfPrefix + "protocol").(string)
+					hostIP := d.Get(pfPrefix + "host_ip").(string)
+					hostPort := d.Get(pfPrefix + "host_port").(int)
+					guestIP := d.Get(pfPrefix + "guest_ip").(string)
+					guestPort := d.Get(pfPrefix + "guest_port").(int)
+
+					rule := fmt.Sprintf("%s,%s,%s,%d,%s,%d",
+						ruleName, protocol, hostIP, hostPort, guestIP, guestPort)
+
+					if _, _, err := vboxRun(ctx, "modifyvm", vmUUID,
+						fmt.Sprintf("--nat-pf%d", nicIdx), rule); err != nil {
+						return fmt.Errorf("failed to add port forwarding rule %q on NIC %d: %w", ruleName, i, err)
+					}
+				}
+			}
+		}
 	}
 
 	return nil
@@ -206,6 +253,8 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 			return "internal"
 		case NICNetGeneric:
 			return "generic"
+		case NICNetNatnetwork:
+			return "natnetwork"
 		default:
 			return ""
 		}
@@ -248,6 +297,7 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 				out["device"] = vboxToTfVdevice(nic.Hardware)
 				out["host_interface"] = nic.HostInterface
 				out["mac_address"] = nic.MacAddr
+				out["nat_network"] = nic.NatNetwork
 				out["cable_connected"] = true
 				out["promiscuous_mode"] = "deny"
 				out["nat_dns_host_resolver"] = false
@@ -324,6 +374,7 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 			out["device"] = vboxToTfVdevice(nic.Hardware)
 			out["host_interface"] = nic.HostInterface
 			out["mac_address"] = nic.MacAddr
+			out["nat_network"] = nic.NatNetwork
 			out["cable_connected"] = true
 			out["promiscuous_mode"] = "deny"
 			out["nat_dns_host_resolver"] = false
@@ -360,6 +411,7 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 			out["device"] = vboxToTfVdevice(nic.Hardware)
 			out["host_interface"] = nic.HostInterface
 			out["mac_address"] = nic.MacAddr
+			out["nat_network"] = nic.NatNetwork
 			out["cable_connected"] = true
 			out["promiscuous_mode"] = "deny"
 			out["nat_dns_host_resolver"] = false

@@ -150,11 +150,18 @@ func parseMachineInfo(output string) (*Machine, error) {
 			nic.Network = NICNetInternal
 		case "generic":
 			nic.Network = NICNetGeneric
+		case "natnetwork":
+			nic.Network = NICNetNatnetwork
 		}
 		nic.MacAddr = props[fmt.Sprintf("macaddress%d", i)]
 		nic.HostInterface = props[fmt.Sprintf("hostonlyadapter%d", i)]
 		if nic.HostInterface == "" {
 			nic.HostInterface = props[fmt.Sprintf("bridgeadapter%d", i)]
+		}
+		// Parse NAT network name for natnetwork NICs
+		natNetworkName := props[fmt.Sprintf("nat-network%d", i)]
+		if natNetworkName != "" && natNetworkName != "default" {
+			nic.NatNetwork = natNetworkName
 		}
 		m.NICs = append(m.NICs, nic)
 	}
@@ -245,6 +252,9 @@ func modifyVM(ctx context.Context, m *Machine) error {
 			case NICNetBridged:
 				args = append(args, "--bridgeadapter"+idx, nic.HostInterface)
 			}
+		}
+		if nic.Network == NICNetNatnetwork && nic.NatNetwork != "" {
+			args = append(args, fmt.Sprintf("--nat-network%d", i+1), nic.NatNetwork)
 		}
 	}
 

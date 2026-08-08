@@ -124,6 +124,12 @@ func resourceVM() *schema.Resource {
 							Computed: true,
 						},
 
+						"nat_network": {
+							Type:        schema.TypeString,
+							Optional:    true,
+							Description: "NAT network name for natnetwork NIC type",
+						},
+
 						"promiscuous_mode": {
 							Type:        schema.TypeString,
 							Optional:    true,

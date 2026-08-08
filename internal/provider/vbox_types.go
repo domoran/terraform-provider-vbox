@@ -44,11 +44,12 @@ const (
 type NICNetwork string
 
 const (
-	NICNetNAT      NICNetwork = "nat"
-	NICNetBridged  NICNetwork = "bridged"
-	NICNetHostonly  NICNetwork = "hostonly"
-	NICNetInternal NICNetwork = "internal"
-	NICNetGeneric  NICNetwork = "generic"
+	NICNetNAT          NICNetwork = "nat"
+	NICNetBridged      NICNetwork = "bridged"
+	NICNetHostonly     NICNetwork = "hostonly"
+	NICNetInternal     NICNetwork = "internal"
+	NICNetGeneric      NICNetwork = "generic"
+	NICNetNatnetwork   NICNetwork = "natnetwork"
 )
 
 // NICHardware represents a NIC hardware type.
@@ -69,4 +70,5 @@ type NIC struct {
 	Hardware      NICHardware
 	HostInterface string
 	MacAddr       string
+	NatNetwork    string
 }
