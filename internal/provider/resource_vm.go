@@ -72,9 +72,9 @@ func resourceVM() *schema.Resource {
 			},
 
 			"status": {
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  "running",
+				Type:        schema.TypeString,
+				Optional:    true,
+				Computed:    true,
 			},
 
 			"user_data": {
@@ -108,9 +108,16 @@ func resourceVM() *schema.Resource {
 						},
 
 						"device": {
-							Type:     schema.TypeString,
-							Optional: true,
-							Default:  "IntelPro1000MTServer",
+							Type:        schema.TypeString,
+							Optional:    true,
+							Default:     "IntelPro1000MTServer",
+							DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+								// Normalize both values to their raw VBox hardware type
+								// so that "IntelPro1000MTServer" == "82545EM" (same hardware).
+								rawOld := tfDeviceToVBox(old)
+								rawNew := tfDeviceToVBox(new)
+								return rawOld == rawNew
+							},
 						},
 
 						"host_interface": {

@@ -96,9 +96,11 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 			}
 		}
 
-		// Start the VM
-		if err := startVM(ctx, d, vm); err != nil {
-			return diag.Errorf("unable to start VM: %v", err)
+		// Start the VM unless status is explicitly "poweroff"
+		if d.Get("status") != "poweroff" {
+			if err := startVM(ctx, d, vm); err != nil {
+				return diag.Errorf("unable to start VM: %v", err)
+			}
 		}
 
 		d.SetId(vm.UUID)
@@ -172,9 +174,11 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 			}
 		}
 
-		// Start the VM
-		if err := startVM(ctx, d, vm); err != nil {
-			return diag.Errorf("unable to start VM: %v", err)
+		// Start the VM unless status is explicitly "poweroff"
+		if d.Get("status") != "poweroff" {
+			if err := startVM(ctx, d, vm); err != nil {
+				return diag.Errorf("unable to start VM: %v", err)
+			}
 		}
 
 		d.SetId(vm.UUID)
@@ -478,9 +482,11 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 		}
 	}
 
-	// Start the VM
-	if err := startVM(ctx, d, vm); err != nil {
-		return diag.Errorf("unable to start VM: %v", err)
+	// Start the VM unless status is explicitly "poweroff"
+	if d.Get("status") != "poweroff" {
+		if err := startVM(ctx, d, vm); err != nil {
+			return diag.Errorf("unable to start VM: %v", err)
+		}
 	}
 
 	// Assign VM ID
@@ -595,9 +601,11 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 		return diag.Errorf("unable to get machine %s: %v", d.Id(), err)
 	}
 
-	// Power off via VBoxManage for reliability
-	vboxRun(ctx, "controlvm", d.Id(), "poweroff") //nolint:errcheck
-	time.Sleep(3 * time.Second)
+	// ACPI poweroff — waits for the guest to shut down cleanly via ACPI.
+	// This is needed because modifyVM cannot be applied to a running VM.
+	if err := waitForPoweroff(ctx, d.Id(), 30*time.Second); err != nil {
+		return diag.Errorf("unable to power off VM for update: %v", err)
+	}
 
 	// Modify VM
 	if err := tfToVbox(ctx, d, vm); err != nil {
@@ -684,8 +692,11 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 		}
 	}
 
-	if err := powerOnAndWait(ctx, d, vm, meta); err != nil {
-		return diag.Errorf("unable to power on and wait for VM: %v", err)
+	// Power on unless status is explicitly "poweroff"
+	if d.Get("status") != "poweroff" {
+		if err := powerOnAndWait(ctx, d, vm, meta); err != nil {
+			return diag.Errorf("unable to power on and wait for VM: %v", err)
+		}
 	}
 
 	// Errors are already logged
@@ -695,9 +706,28 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 func resourceVMDelete(d *schema.ResourceData, meta any) error {
 	vmID := d.Id()
 
-	// Power off the VM first (ignore errors — it may already be off)
-	vboxRun(context.Background(), "controlvm", vmID, "poweroff") //nolint:errcheck
-	time.Sleep(3 * time.Second)
+	// VBoxManage won't unregister a running VM, so we must power it off first.
+	// Use a hard poweroff (controlvm poweroff) since the VM is being destroyed anyway.
+	if _, _, err := vboxRun(context.Background(), "controlvm", vmID, "poweroff"); err != nil {
+		// If already poweroff or not found, that's fine — proceed.
+		tflog.Warn(context.Background(), "controlvm poweroff returned error, proceeding anyway", map[string]any{
+			"vm": vmID, "error": err,
+		})
+	}
+
+	// Poll until VM state actually reaches poweroff (VBoxManage returns immediately).
+	// Simple inline polling — no retry.StateConf machinery needed for delete.
+	for i := 0; i < 60; i++ {
+		vm, err := getMachine(vmID)
+		if err != nil {
+			// VM already gone or not found — safe to proceed
+			break
+		}
+		if vm.State == MachineStatePoweroff {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
 
 	// Unregister and delete all files
 	if _, _, err := vboxRun(context.Background(), "unregistervm", vmID, "--delete"); err != nil {

@@ -158,6 +158,10 @@ func parseMachineInfo(output string) (*Machine, error) {
 		if nic.HostInterface == "" {
 			nic.HostInterface = props[fmt.Sprintf("bridgeadapter%d", i)]
 		}
+		// Parse hardware device type (e.g. "82545EM", "virtio", "82540EM")
+		if hwType := props[fmt.Sprintf("nictype%d", i)]; hwType != "" {
+			nic.Hardware = NICHardware(hwType)
+		}
 		// Parse NAT network name for natnetwork NICs
 		natNetworkName := props[fmt.Sprintf("nat-network%d", i)]
 		if natNetworkName != "" && natNetworkName != "default" {

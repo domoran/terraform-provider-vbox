@@ -109,6 +109,7 @@ func TestParseMachineInfo_AllNICTypes(t *testing.T) {
 		{"hostonly", NICNetHostonly},
 		{"intnet", NICNetInternal},
 		{"generic", NICNetGeneric},
+		{"natnetwork", NICNetNatnetwork},
 	}
 
 	for _, tt := range tests {
@@ -125,6 +126,30 @@ func TestParseMachineInfo_AllNICTypes(t *testing.T) {
 				t.Errorf("expected %q, got %q", tt.expected, m.NICs[0].Network)
 			}
 		})
+	}
+}
+
+func TestParseMachineInfo_NICHardwareDevice(t *testing.T) {
+	output := `nic1="natnetwork"
+nictype1="82545EM"
+macaddress1="080027AABBCC"
+nat-network1="lab-network"
+`
+	m, err := parseMachineInfo(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(m.NICs) != 1 {
+		t.Fatalf("expected 1 NIC, got %d", len(m.NICs))
+	}
+	if m.NICs[0].Hardware != "82545EM" {
+		t.Errorf("expected hardware '82545EM', got %q", m.NICs[0].Hardware)
+	}
+	if m.NICs[0].Network != NICNetNatnetwork {
+		t.Errorf("expected network 'natnetwork', got %q", m.NICs[0].Network)
+	}
+	if m.NICs[0].NatNetwork != "lab-network" {
+		t.Errorf("expected nat_network 'lab-network', got %q", m.NICs[0].NatNetwork)
 	}
 }
 

@@ -11,6 +11,28 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
+// tfDeviceToVBox converts a Terraform device name to its raw VBox hardware type.
+// If the input is already a raw VBox value (e.g. "82545EM"), it is returned as-is.
+func tfDeviceToVBox(device string) string {
+	switch device {
+	case "PCIII":
+		return "Am79C970A"
+	case "FASTIII":
+		return "Am79C973"
+	case "IntelPro1000MTDesktop":
+		return "82540EM"
+	case "IntelPro1000TServer":
+		return "82543GC"
+	case "IntelPro1000MTServer":
+		return "82545EM"
+	case "VirtIO":
+		return "virtio"
+	default:
+		// Already a raw VBox value or unknown — return as-is
+		return device
+	}
+}
+
 func netTfToVbox(ctx context.Context, d *schema.ResourceData) ([]NIC, error) {
 	tfToVboxNetworkType := func(attr string) (NICNetwork, error) {
 		switch attr {
@@ -256,7 +278,7 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 		case NICNetNatnetwork:
 			return "natnetwork"
 		default:
-			return ""
+			return string(netType)
 		}
 	}
 
@@ -275,7 +297,18 @@ func netVboxToTf(vm *Machine, d *schema.ResourceData) error {
 		case VirtIO:
 			return "VirtIO"
 		default:
-			return ""
+			// Known raw VBox hardware values — map back to canonical Terraform name
+			// to avoid spurious drift (e.g. "82545EM" → "IntelPro1000MTServer")
+			switch vdevice {
+			case "82540EM":
+				return "IntelPro1000MTDesktop"
+			case "82543GC":
+				return "IntelPro1000TServer"
+			case "82545EM":
+				return "IntelPro1000MTServer"
+			default:
+				return string(vdevice)
+			}
 		}
 	}
 

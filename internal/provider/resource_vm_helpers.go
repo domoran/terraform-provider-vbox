@@ -16,6 +16,41 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
+// waitForPoweroff sends an ACPI poweroff signal to the VM and waits for the
+// VM state to reach "poweroff" or the timeout expires. This ensures the guest
+// OS has time to shut down cleanly before we proceed with modifications.
+func waitForPoweroff(ctx context.Context, vmUUID string, timeout time.Duration) error {
+	// Send ACPI poweroff signal (graceful shutdown via guest OS).
+	// VBoxManage returns immediately, so we must poll for actual state.
+	_, _, err := vboxRun(ctx, "controlvm", vmUUID, "poweroff")
+	if err != nil {
+		// If the VM is already poweroff or not found, that's fine — continue.
+		tflog.Warn(ctx, "controlvm poweroff returned error, proceeding anyway", map[string]any{
+			"vm": vmUUID, "error": err,
+		})
+	}
+
+	// Poll until VM reaches "poweroff" state.
+	stateConf := &retry.StateChangeConf{
+		Pending:      []string{"running", "paused", "saved"},
+		Target:       []string{"poweroff"},
+		Refresh: func() (interface{}, string, error) {
+			vm, err := getMachine(vmUUID)
+			if err != nil {
+				return nil, "", fmt.Errorf("get machine: %w", err)
+			}
+			return vm, string(vm.State), nil
+		},
+		Timeout:    timeout,
+		MinTimeout: 1 * time.Second,
+	}
+	_, err = stateConf.WaitForStateContext(ctx)
+	if err != nil {
+		return fmt.Errorf("timed out waiting for VM to power off (timeout=%v): %w", timeout, err)
+	}
+	return nil
+}
+
 // startVM starts the VM respecting the gui attribute. When gui is true,
 // VBoxManage startvm is called with --type gui; otherwise headless.
 func startVM(ctx context.Context, d *schema.ResourceData, vm *Machine) error {
