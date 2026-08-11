@@ -16,13 +16,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
-// waitForPoweroff sends an ACPI poweroff signal to the VM and waits for the
+// waitForPoweroff sends an ACPI poweroff button signal to the VM and waits for the
 // VM state to reach "poweroff" or the timeout expires. This ensures the guest
 // OS has time to shut down cleanly before we proceed with modifications.
 func waitForPoweroff(ctx context.Context, vmUUID string, timeout time.Duration) error {
 	// Send ACPI poweroff signal (graceful shutdown via guest OS).
 	// VBoxManage returns immediately, so we must poll for actual state.
-	_, _, err := vboxRun(ctx, "controlvm", vmUUID, "poweroff")
+	_, _, err := vboxRun(ctx, "controlvm", vmUUID, "acpipowerbutton")
 	if err != nil {
 		// If the VM is already poweroff or not found, that's fine — continue.
 		tflog.Warn(ctx, "controlvm poweroff returned error, proceeding anyway", map[string]any{
@@ -42,7 +42,7 @@ func waitForPoweroff(ctx context.Context, vmUUID string, timeout time.Duration) 
 			return vm, string(vm.State), nil
 		},
 		Timeout:    timeout,
-		MinTimeout: 1 * time.Second,
+		MinTimeout: 2 * time.Second,
 	}
 	_, err = stateConf.WaitForStateContext(ctx)
 	if err != nil {

@@ -77,6 +77,13 @@ func resourceVM() *schema.Resource {
 				Computed:    true,
 			},
 
+			"check_node_is_up": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     false,
+				Description: "Wait for network connectivity (IPv4 on non-NAT adapter) after powering on. Primarily useful when DHCP is enabled. Defaults to false.",
+			},
+
 			"user_data": {
 				Type:        schema.TypeString,
 				Optional:    true,

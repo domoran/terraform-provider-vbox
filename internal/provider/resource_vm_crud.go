@@ -105,8 +105,10 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 
 		d.SetId(vm.UUID)
 
-		if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
-			return diag.Errorf("failed to wait until VM is ready: %v", err)
+		if d.Get("check_node_is_up").(bool) {
+			if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
+				return diag.Errorf("failed to wait until VM is ready: %v", err)
+			}
 		}
 
 		return resourceVMRead(ctx, d, meta)
@@ -183,8 +185,10 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 
 		d.SetId(vm.UUID)
 
-		if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
-			return diag.Errorf("failed to wait until VM is ready: %v", err)
+		if d.Get("check_node_is_up").(bool) {
+			if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
+				return diag.Errorf("failed to wait until VM is ready: %v", err)
+			}
 		}
 
 		return resourceVMRead(ctx, d, meta)
@@ -495,8 +499,10 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 	})
 	d.SetId(vm.UUID)
 
-	if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
-		return diag.Errorf("failed to wait until VM is ready: %v", err)
+	if d.Get("check_node_is_up").(bool) {
+		if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
+			return diag.Errorf("failed to wait until VM is ready: %v", err)
+		}
 	}
 
 	// Errors here are already logged.
@@ -601,10 +607,33 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 		return diag.Errorf("unable to get machine %s: %v", d.Id(), err)
 	}
 
-	// ACPI poweroff — waits for the guest to shut down cleanly via ACPI.
-	// This is needed because modifyVM cannot be applied to a running VM.
-	if err := waitForPoweroff(ctx, d.Id(), 30*time.Second); err != nil {
-		return diag.Errorf("unable to power off VM for update: %v", err)
+	oldStatus, newStatus := d.GetChange("status")
+	oldState := oldStatus.(string)
+	newState := newStatus.(string)
+
+	// Determine whether we need to shut down the VM.
+	// ACPI poweroff is required only when:
+	//   - A non-power-on status change is requested (running -> poweroff/paused/saved)
+	//   - Config changes that require a powered-off VM are detected
+	//
+	// If only status is changing, handle it directly without unnecessary shutdowns.
+	needsPowerOff := false
+
+	if oldState == "running" && newState != "running" {
+		// User explicitly wants to shut down/pause the VM — do it.
+		needsPowerOff = true
+	} else if oldState == "running" && newState == "running" {
+		// VM stays running — only shut down if there are non-dynamic config changes.
+		// For now, we always modify the VM config. If it requires poweroff, we handle it.
+		// Most config changes (CPU, memory, etc.) require a powered-off VM.
+		needsPowerOff = true
+	}
+
+	// Only power off if the VM is currently running and we need to modify config.
+	if needsPowerOff && oldState == "running" {
+		if err := waitForPoweroff(ctx, d.Id(), 90*time.Second); err != nil {
+			return diag.Errorf("unable to power off VM for update: %v", err)
+		}
 	}
 
 	// Modify VM
@@ -693,9 +722,16 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 	}
 
 	// Power on unless status is explicitly "poweroff"
+	// During updates we only wait for network if check_node_is_up is enabled
+	// (primarily useful on initial Create for DHCP provisioning).
 	if d.Get("status") != "poweroff" {
-		if err := powerOnAndWait(ctx, d, vm, meta); err != nil {
-			return diag.Errorf("unable to power on and wait for VM: %v", err)
+		if err := startVM(ctx, d, vm); err != nil {
+			return diag.Errorf("unable to start VM: %v", err)
+		}
+		if d.Get("check_node_is_up").(bool) {
+			if err := waitUntilVMIsReady(ctx, d, vm, meta); err != nil {
+				return diag.Errorf("unable to power on and wait for VM: %v", err)
+			}
 		}
 	}
 
