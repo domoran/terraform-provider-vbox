@@ -82,7 +82,9 @@ func TestParseMachineInfo_AllStates(t *testing.T) {
 		{"paused", MachineStatePaused},
 		{"saved", MachineStateSaved},
 		{"aborted", MachineStateAborted},
-		{"unknown", MachineStatePoweroff}, // default
+		{"terminating", MachineStateAborted}, // explicitly handled
+		{"deleting", MachineStateAborted},     // explicitly handled
+		{"unknown", MachineStateRunning}, // default: unknown → running (safe)
 	}
 
 	for _, tt := range tests {

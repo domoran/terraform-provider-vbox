@@ -127,8 +127,14 @@ func parseMachineInfo(output string) (*Machine, error) {
 		m.State = MachineStateSaved
 	case "aborted":
 		m.State = MachineStateAborted
+	case "terminating", "deleting":
+		m.State = MachineStateAborted
 	default:
-		m.State = MachineStatePoweroff
+		// Treat any unknown/unexpected state as running so callers don't
+		// assume the VM is powered off and proceed to unregister it while
+		// it's still alive.  This prevents the "VM not yet powered off"
+		// race condition during destroy.
+		m.State = MachineStateRunning
 	}
 
 	// Parse NICs (up to 8)
