@@ -794,6 +794,7 @@ func resourceVMDelete(d *schema.ResourceData, meta any) error {
 		}
 		return fmt.Errorf("failed to query VM %s before delete: %w", vmID, err)
 	}
+	baseFolder := vm.BaseFolder
 
 	switch vm.State {
 	case MachineStatePoweroff, MachineStateAborted:
@@ -865,7 +866,59 @@ func resourceVMDelete(d *schema.ResourceData, meta any) error {
 	if _, stderr, err := vboxRun(ctx, "unregistervm", vmID, "--delete"); err != nil {
 		return fmt.Errorf("unable to remove the VM: %v (stderr: %s)", err, strings.TrimSpace(stderr))
 	}
+
+	// Best-effort: on some hosts (Windows) VBoxSVC briefly keeps handles
+	// on log files, so unregistervm --delete can leave an orphaned folder
+	// with only logs behind. Clean that up without failing the destroy.
+	cleanupVMFolder(baseFolder)
 	return nil
+}
+
+// cleanupVMFolder removes a VM's machine folder if it is still present
+// after unregistration. It waits a short while for VirtualBox's own
+// deletion to finish, and never deletes a folder that still contains a
+// machine config (*.vbox) - some VM may be registered there. Failures
+// are logged, never returned: the VM itself is already gone.
+// vmFolderCleanupTimeout is how long cleanupVMFolder waits for
+// VirtualBox's own folder deletion to finish before removing leftovers.
+var vmFolderCleanupTimeout = 5 * time.Second
+
+func cleanupVMFolder(baseFolder string) {
+	if baseFolder == "" {
+		return
+	}
+
+	deadline := time.Now().Add(vmFolderCleanupTimeout)
+	for {
+		if _, err := os.Stat(baseFolder); errors.Is(err, os.ErrNotExist) {
+			return // folder already gone
+		} else if err != nil {
+			tflog.Debug(context.Background(), "cannot stat VM folder, leaving it", map[string]any{
+				"folder": baseFolder, "error": err,
+			})
+			return
+		}
+		// Never delete a folder that still holds a machine config.
+		if entries, rerr := os.ReadDir(baseFolder); rerr == nil {
+			for _, e := range entries {
+				if strings.HasSuffix(strings.ToLower(e.Name()), ".vbox") {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	if err := os.RemoveAll(baseFolder); err != nil {
+		tflog.Warn(context.Background(), "could not remove leftover VM folder", map[string]any{
+			"folder": baseFolder, "error": err,
+		})
+	} else {
+		tflog.Info(context.Background(), "removed leftover VM folder", map[string]any{"folder": baseFolder})
+	}
 }
 
 // hardPoweroff force-powers a VM off (equivalent to holding the physical
