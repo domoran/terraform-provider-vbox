@@ -1,0 +1,20 @@
+# OpenTofu/Terraform CLI config for manual testing against a locally
+# built provider binary.
+#
+# Build the provider first:
+#   go build -o "$HOME/go/bin/terraform-provider-vbox.exe" .
+#
+# Usage (PowerShell, from an example directory):
+#   $env:TF_CLI_CONFIG_FILE = "C:\Coding\infra\providers\terraform-provider-virtualbox\tests\manual\dev.tofurc"
+#   tofu init
+#   tofu apply
+#
+# dev_overrides means `tofu init` will NOT download the provider; the
+# binary in the directory below is used directly.
+
+provider_installation {
+  dev_overrides {
+    "registry.terraform.io/eran132/vbox" = "C:/Users/Nutzer/go/bin"
+  }
+  direct {}
+}

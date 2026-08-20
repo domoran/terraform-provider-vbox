@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -37,11 +38,14 @@ func resourceVMCreate(ctx context.Context, d *schema.ResourceData, meta any) dia
 	if ovaSource := d.Get("ova_source").(string); ovaSource != "" {
 		name := d.Get("name").(string)
 
-		// Import OVA — VBoxManage import automatically creates and registers the VM
-		args := []string{"import", ovaSource, "--vsys", "0", "--vmname", name}
-
-		if _, _, err := vboxRun(ctx, args...); err != nil {
-			return diag.Errorf("failed to import OVA %s: %v", ovaSource, err)
+		// Import OVA — VBoxManage import automatically creates and registers the VM.
+		// Serialize concurrent imports (they can contend inside VBoxSVC and fail
+		// intermittently) and retry with backoff on transient errors.
+		importOpMutex.Lock()
+		importErr := importOVAWithRetry(ctx, ovaSource, name)
+		importOpMutex.Unlock()
+		if importErr != nil {
+			return diag.Errorf("failed to import OVA %s: %v", ovaSource, importErr)
 		}
 
 		// Get the imported VM
@@ -739,70 +743,167 @@ func resourceVMUpdate(ctx context.Context, d *schema.ResourceData, meta any) dia
 	return resourceVMRead(ctx, d, meta)
 }
 
+// importOVAWithRetry imports an OVA into VirtualBox, retrying transient
+// failures with backoff. A failed import can leave a partially registered
+// VM behind, so each retry removes any existing VM with the target name
+// first.
+func importOVAWithRetry(ctx context.Context, ovaSource, name string) error {
+	args := []string{"import", ovaSource, "--vsys", "0", "--vmname", name}
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			// Clean up a partially registered VM from the failed attempt.
+			if m, err := getMachine(name); err == nil {
+				tflog.Warn(ctx, "removing partially imported VM before retry", map[string]any{
+					"vm": name, "uuid": m.UUID,
+				})
+				if _, _, delErr := vboxRun(ctx, "unregistervm", m.UUID, "--delete"); delErr != nil {
+					tflog.Warn(ctx, "failed to remove partially imported VM", map[string]any{
+						"vm": m.UUID, "error": delErr,
+					})
+				}
+			}
+			backoff := time.Duration(attempt) * 3 * time.Second
+			tflog.Warn(ctx, "retrying OVA import", map[string]any{
+				"ova": ovaSource, "attempt": attempt, "backoff": backoff.String(),
+			})
+			time.Sleep(backoff)
+		}
+
+		if _, stderr, err := vboxRun(ctx, args...); err != nil {
+			lastErr = fmt.Errorf("%v (stderr: %s)", err, strings.TrimSpace(stderr))
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
 func resourceVMDelete(d *schema.ResourceData, meta any) error {
 	vmID := d.Id()
+	// Use a background context: destroy must not be aborted mid-poweroff or
+	// mid-unregister if the RPC context is cancelled.
+	ctx := context.Background()
 
-	// Step 1 — attempt a graceful ACPI poweroff (grabs the guest OS).
-	// If the guest is already down or unresponsive, fall through to the
-	// hard poweroff below.
-	if _, _, err := vboxRun(context.Background(), "controlvm", vmID, "acpipowerbutton"); err == nil {
-		// Give the guest OS a few seconds to shut down cleanly.
-		time.Sleep(5 * time.Second)
-	}
-
-	// Step 2 — poll up to 60 s for the VM to reach poweroff.
-	// The loop breaks early if getMachine returns an error (VM already
-	// gone) or if the VM actually reaches MachineStatePoweroff.
-	for i := 0; i < 60; i++ {
-		vm, err := getMachine(vmID)
-		if err != nil {
-			// VM already gone or not found — safe to proceed.
-			break
-		}
-		if vm.State == MachineStatePoweroff {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	// Step 3 — if the VM is still running after 60 s, escalate to a hard
-	// poweroff (equivalent to holding the physical power button).
 	vm, err := getMachine(vmID)
-	if err == nil && vm.State != MachineStatePoweroff && vm.State != MachineStateAborted {
-		tflog.Warn(context.Background(), "VM did not power off after 60 s, escalating to hard poweroff", map[string]any{
-			"vm": vmID, "current_state": vm.State,
-		})
-		if _, _, err := vboxRun(context.Background(), "controlvm", vmID, "poweroff"); err != nil {
-			// If even the hard poweroff fails (VM vanished), that's fine —
-			// proceed to unregister below.
-			tflog.Warn(context.Background(), "hard poweroff returned error, proceeding anyway", map[string]any{
-				"vm": vmID, "error": err,
-			})
+	if err != nil {
+		if errors.Is(err, ErrMachineNotExist) {
+			// VM already gone — nothing to do.
+			return nil
+		}
+		return fmt.Errorf("failed to query VM %s before delete: %w", vmID, err)
+	}
+
+	switch vm.State {
+	case MachineStatePoweroff, MachineStateAborted:
+		// Already off — nothing to do.
+
+	case MachineStateSaved:
+		// A saved-state VM has no live session; unregistervm --delete
+		// removes the VM together with its saved state file.
+
+	case MachineStatePaused:
+		// A paused guest executes nothing: an ACPI power button is
+		// rejected and a 60 s graceful-shutdown wait would be wasted.
+		if err := hardPoweroff(ctx, vmID); err != nil {
+			return err
 		}
 
-		// Re-poll briefly after the hard poweroff.
-		for j := 0; j < 10; j++ {
-			vm, err := getMachine(vmID)
+	default:
+		// MachineStateRunning (and any unexpected state, which
+		// parseMachineInfo maps to running): try a graceful ACPI
+		// poweroff first (grabs the guest OS). If the guest is
+		// unresponsive (booting, hung, ACPI disabled, ...), escalate to
+		// the hard poweroff below.
+		if _, _, acpiErr := vboxRun(ctx, "controlvm", vmID, "acpipowerbutton"); acpiErr == nil {
+			// Give the guest OS a few seconds to shut down cleanly.
+			time.Sleep(5 * time.Second)
+		}
+
+		// Poll up to 60 s for the VM to reach poweroff.
+		poweredOff := false
+		for i := 0; i < 60; i++ {
+			vm, err = getMachine(vmID)
 			if err != nil {
-				break
+				if errors.Is(err, ErrMachineNotExist) {
+					return nil // VM vanished — nothing left to delete.
+				}
+				// Transient error — retry on the next iteration.
+				tflog.Debug(ctx, "transient error while polling VM state during delete", map[string]any{
+					"vm": vmID, "error": err,
+				})
+				time.Sleep(1 * time.Second)
+				continue
 			}
-			if vm.State == MachineStatePoweroff {
+			if vm.State == MachineStatePoweroff || vm.State == MachineStateAborted {
+				poweredOff = true
 				break
 			}
 			time.Sleep(1 * time.Second)
 		}
+
+		// Escalate to a hard poweroff if the guest did not shut down.
+		if !poweredOff {
+			if err := hardPoweroff(ctx, vmID); err != nil {
+				return err
+			}
+		}
 	}
 
-	// Step 4 — final sanity check: only attempt to unregister if the VM is
-	// actually in a terminal state (poweroff or aborted).  If getMachine
-	// returns an error the VM is already gone, so that's also safe.
-	if err == nil && (vm.State == MachineStateRunning || vm.State == MachineStatePaused || vm.State == MachineStateSaved) {
+	// Final sanity check: never unregister a live (running/paused) VM.
+	// A saved VM is deletable; a not-found error means the VM is gone.
+	if vm, err = getMachine(vmID); err != nil {
+		if !errors.Is(err, ErrMachineNotExist) {
+			return fmt.Errorf("failed to verify VM %s state before unregister: %w", vmID, err)
+		}
+	} else if vm.State == MachineStateRunning || vm.State == MachineStatePaused {
 		return fmt.Errorf("VM %s is still %s after poweroff attempts — refusing to unregister a live VM", vmID, vm.State)
 	}
 
-	// Step 5 — unregister and delete all files.
-	if _, _, err := vboxRun(context.Background(), "unregistervm", vmID, "--delete"); err != nil {
-		return fmt.Errorf("unable to remove the VM: %w", err)
+	// Unregister and delete all files.
+	if _, stderr, err := vboxRun(ctx, "unregistervm", vmID, "--delete"); err != nil {
+		return fmt.Errorf("unable to remove the VM: %v (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// hardPoweroff force-powers a VM off (equivalent to holding the physical
+// power button) and waits until it has actually reached poweroff.
+func hardPoweroff(ctx context.Context, vmID string) error {
+	tflog.Warn(ctx, "escalating to hard poweroff", map[string]any{"vm": vmID})
+	if _, stderr, err := vboxRun(ctx, "controlvm", vmID, "poweroff"); err != nil {
+		// A non-zero exit can mean the VM vanished or is already off; the
+		// re-poll below decides.
+		tflog.Warn(ctx, "hard poweroff returned error, re-checking state", map[string]any{
+			"vm": vmID, "error": err, "stderr": strings.TrimSpace(stderr),
+		})
+	}
+
+	for j := 0; j < 10; j++ {
+		vm, err := getMachine(vmID)
+		if err != nil {
+			if errors.Is(err, ErrMachineNotExist) {
+				return nil // VM gone — treat as success.
+			}
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		if vm.State == MachineStatePoweroff || vm.State == MachineStateAborted {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	vm, err := getMachine(vmID)
+	if err != nil {
+		if errors.Is(err, ErrMachineNotExist) {
+			return nil
+		}
+		return fmt.Errorf("failed to verify VM %s state after hard poweroff: %w", vmID, err)
+	}
+	if vm.State != MachineStatePoweroff && vm.State != MachineStateAborted {
+		return fmt.Errorf("VM %s is still %s after hard poweroff — refusing to unregister a live VM", vmID, vm.State)
 	}
 	return nil
 }

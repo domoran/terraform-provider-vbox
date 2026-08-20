@@ -13,6 +13,11 @@ var (
 
 var imageOpMutex sync.Mutex
 
+// importOpMutex serializes `VBoxManage import` calls. Concurrent OVA imports
+// can contend inside VBoxSVC (file locks, medium registration) and fail
+// intermittently, so they run one at a time within a provider process.
+var importOpMutex sync.Mutex
+
 func resourceVM() *schema.Resource {
 	return &schema.Resource{
 		Exists:        resourceVMExists,
