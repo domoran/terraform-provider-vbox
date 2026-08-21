@@ -1,6 +1,7 @@
 .vendor
 vendor/
 dist/
+build/
 *.sublime-workspace
 *.log
 *.tfstate*
@@ -21,3 +22,10 @@ coverage.txt
 tests/manual/terraform.tfstate*
 tests/manual/.terraform*
 *.exe
+
+# test run artifacts
+.terraform/
+terraform.tfstate*
+tofu-debug.log
+observer.log
+apply.log

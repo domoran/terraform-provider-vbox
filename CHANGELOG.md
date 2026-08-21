@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.0
+
+- NatNetwork: Allow connecting VM to custom nat network 
+- Fix destroy behaviour 
+
+
 ## v1.1.0 (Unreleased)
 
 ### Features

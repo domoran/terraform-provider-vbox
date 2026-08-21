@@ -48,6 +48,36 @@ The [`/examples`](/examples) directory contains ready-to-use configurations:
 
 If you want to contribute documentation changes, see the [Contribution guide](CONTRIBUTING.md).
 
+## Installation
+
+### Private file-based registry (OpenTofu)
+
+Publish the provider to a local filesystem registry (default
+`C:\Coding\tofu_registry`) for 4 platforms:
+
+```powershell
+.\deploy.ps1
+# or with an explicit registry directory:
+.\deploy.ps1 D:\shared\tofu_registry
+```
+
+The version defaults to the first semantic version found in
+`CHANGELOG.md` (override with `-Version`) and is injected into the binary
+via `-ldflags "-X main.version=<version>"`. Zips are placed under
+`<registry>\registry.terraform.io\eran132\vbox\`, matching the serve
+address in `main.go`.
+
+Consume it by pointing OpenTofu at a CLI config file that mirrors the
+registry, e.g.:
+
+```powershell
+$env:TF_CLI_CONFIG_FILE = "C:\Coding\tofu_registry\tofu.tfrc"
+tofu init
+```
+
+See `C:\Coding\tofu_registry\README.md` for the registry layout and
+`C:\Coding\tofu_registry\examples\virtualbox\` for a working example.
+
 ## Limitations
 
 - __Experimental provider!__
